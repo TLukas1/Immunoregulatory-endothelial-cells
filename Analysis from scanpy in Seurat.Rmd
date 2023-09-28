@@ -1,0 +1,298 @@
+---
+title: "Analysis from Scanpy objects EHT"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(reshape2)
+library(CellChat)
+
+load("/media/tombor/Helios_scStorage/Lukas/Analysis/EHT/Combined_Seurats/220514_Seurat_of_Anndata3.Rds")
+
+Idents(EcHe) <- "subcluster"
+
+EcHe@reductions[["umap"]] <- Seurat::CreateDimReducObject(embeddings = EcHe@reductions[["umap"]], assay = DefaultAssay(EcHe), key = "UMAP ")
+
+DimPlot(EcHe)
+
+EcHe$GFP_new <- ifelse(EcHe$Batch == "Batch1", "Rosenthal", 
+                       ifelse(EcHe$GFP == "GFP.pos" & EcHe$subcluster == "IMEC (16)", "Cdh5-traced IMEC (16)",
+                              ifelse(EcHe$GFP == "GFP.pos" & EcHe$subcluster %in% c("Artery EC (0)", "Artery EC (17)", "Artery EC (8)", "Venous EC (4)", "Lymphatic EC (12)"), "Cdh5-traced ECs", 
+                                     ifelse(EcHe$GFP == "GFP.pos" & EcHe$leiden == "Myeloid cells", "Cdh5-traced Myeloid cells", 
+                                             ifelse(EcHe$GFP != "GFP.pos" & EcHe$leiden == "Myeloid cells", "non-traced Myeloid cells", "non-traced ECs")))))
+
+
+Idents(EcHe) <- "GFP_new"
+
+DimPlot(EcHe, cols = c(rep("grey90", times = 5), "#4f772d"))
+```
+```{r}
+remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+
+library("DoubletFinder")
+
+load("/media/tombor/Helios_scStorage/Lukas/Analysis/EHT/Combined_Seurats/220517_Seurat_of_Anndata_concat.Rds")
+
+DefaultAssay(Myo_concat) <- "RNA"
+List <- SplitObject(Myo_concat, split.by = "Sample")
+
+List <- lapply(X = List, FUN = function(x) {
+x <- NormalizeData(x)
+x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+x <- ScaleData(x)
+x <- RunPCA(x)
+x <- RunUMAP(x, dims = 1:25)
+})
+
+List2 <- lapply(X = List, FUN = function(x){
+nExp_poi <- round(0.05*nrow(x@meta.data))
+x <- doubletFinder_v3(x, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi, reuse.pANN = FALSE, sct = FALSE)
+}
+)
+
+meta <- lapply(X = List2, FUN = function(x){
+  meta <- x@meta.data
+  colnames(meta)[14:15] <- c("pANN", "DF.classification")
+  return(meta)})
+
+common.meta <- purrr::reduce(meta, full_join)
+
+rownames(common.meta) <- rownames(Myo_concat@meta.data)
+
+load("/media/tombor/Helios_scStorage/Lukas/Analysis/EHT/Combined_Seurats/220514_Seurat_of_Anndata3.Rds")
+#load("/media/tombor/Helios_scStorage/Lukas/Analysis/EHT/Combined_Seurats/220514_Seurat_of_Anndata.Rds")
+
+# Find Doublets in anndata object 
+
+EcHe$Barcode <- str_replace(rownames(EcHe@meta.data), pattern = "x-.*", replacement = "")
+common.meta$Barcode <- str_replace(rownames(common.meta), pattern = "x-.*", replacement = "")
+
+sub.common.meta <- common.meta %>% select(Barcode, pANN, DF.classification)
+
+EcHe_meta <- EcHe@meta.data %>% select(Barcode, subcluster)
+
+merged_meta <- left_join(EcHe_meta, sub.common.meta)
+
+tbl <- merged_meta %>% group_by(subcluster, DF.classification) %>% tally() %>% mutate(freq = n/sum(n))
+
+tbl$subcluster <- factor(tbl$subcluster, levels = c("Artery EC (0)", "Artery EC (8)", "Artery EC (17)", "Lymphatic EC (12)", "Venous EC (4)", "IMEC (16)", "Monocyte (5)", "Monocyte (10)", "Inflamm. Monocyte (3)", "Class. Monocyte (1)", "Class. Monocyte (2)", "Cxcl3+ Monocyte (6)", "Cxcl3+ Monocyte (13)", "Non-Clas. Monocyte (7)", "Timd4+ resident Macro (11)", "Ccr2+ circulating (14)", "Cd209+ cDC (9)", "Interferon DC (15)"))
+
+ggplot(tbl, aes(x = subcluster, y = freq, fill = DF.classification))+
+  geom_col(color = "black")+
+  scale_y_continuous(labels = scales::percent_format())+
+  theme_classic()+
+  scale_fill_manual(values = c("red", "grey80"))+
+  theme(legend.position = "right", axis.text.x = element_text(color = "black", face = "bold", size = 11, angle = 45, hjust = 1), 
+        axis.text.y = element_text(color = "black", size = 13), axis.title = element_text(size = 16), line= element_line(color = "black", size = .5),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 18))
+
+SEM <- function(x){sd(x)/sqrt(length(x))}
+
+tbl <- merged_meta %>% group_by(subcluster) %>% summarize(mean = mean(pANN), SEM =  SEM(pANN))
+
+tbl$subcluster <- factor(tbl$subcluster, levels = c("Artery EC (0)", "Artery EC (8)", "Artery EC (17)", "Lymphatic EC (12)", "Venous EC (4)", "IMEC (16)", "Monocyte (5)", "Monocyte (10)", "Inflamm. Monocyte (3)", "Class. Monocyte (1)", "Class. Monocyte (2)", "Cxcl3+ Monocyte (6)", "Cxcl3+ Monocyte (13)", "Non-Clas. Monocyte (7)", "Timd4+ resident Macro (11)", "Ccr2+ circulating (14)", "Cd209+ cDC (9)", "Interferon DC (15)"))
+
+ggplot(tbl, aes(x = subcluster, y = mean))+
+  geom_col(color = "black", position = position_dodge(width = .9))+
+  geom_errorbar(aes(ymin = mean - SEM, ymax = mean + SEM), width = .1, position = position_dodge(width = .9))+
+  scale_y_continuous(labels = scales::percent_format())+
+  theme_classic()+
+  theme(legend.position = "right", axis.text.x = element_text(color = "black", face = "bold", size = 11, angle = 45, hjust = 1), 
+        axis.text.y = element_text(color = "black", size = 13), axis.title = element_text(size = 16), line= element_line(color = "black", size = .5),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 18))+ 
+  labs(y = "Average pANN")
+
+# density plot 
+
+ggplot(merged_meta, aes(x = pANN, fill = subcluster))+
+  geom_density()+
+  theme_classic()+
+  facet_wrap(~subcluster, ncol = 9)+
+  theme(legend.position = "right", axis.text.x = element_text(color = "black", face = "bold", size = 11, angle = 45, hjust = 1), 
+        axis.text.y = element_text(color = "black", size = 13), axis.title = element_text(size = 16), line= element_line(color = "black", size = .5),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 18))+ 
+  labs(x = "pANN", y = "count")
+  
+
+```
+
+```{r}
+# Annotate celltypes in Myo_concat
+
+load("/media/tombor/Helios_scStorage/Lukas/Analysis/EHT/Combined_Seurats/220514_Seurat_of_Anndata.Rds")
+
+Myo_meta <- Myo@meta.data
+
+Myo_meta$Barcode = str_replace(rownames(Myo_meta), pattern = "x-.*", replacement = "")
+Myo_concat$Barcode <- str_replace(rownames(Myo_concat@meta.data), pattern = "x-.*", replacement = "")
+
+Myo_meta <- Myo_meta %>% select(Barcode, leiden)
+
+new_meta <- left_join(Myo_concat@meta.data, Myo_meta)
+
+new_meta <- unique(new_meta)
+
+rownames(new_meta) <-rownames(Myo_concat@meta.data)
+
+Myo_concat@meta.data <- new_meta
+
+EcHe$Barcode <- str_replace(rownames(EcHe@meta.data), pattern = "x-.*", replacement = "")
+Myo_concat$Barcode <- str_replace(rownames(Myo_concat@meta.data), pattern = "x-.*", replacement = "")
+
+Myo_concat_clean <- subset(Myo_concat, cells = WhichCells(Myo_concat, cells = rownames(Myo_concat@meta.data)[!duplicated(Myo_concat$Barcode)]))
+
+Celltype_det <- NULL
+for(i in Myo_concat_clean$Barcode){
+  if(i %in% EcHe$Barcode){
+    Celltype_det[i] <- EcHe@meta.data[which(EcHe$Barcode == i), "subcluster"]
+  }
+  else{Celltype_det[i] <- Myo_concat_clean@meta.data[which(Myo_concat_clean$Barcode == i), "leiden"]}
+}
+
+Myo_concat_clean$Celltype_detailed <- Celltype_det
+Idents(Myo_concat_clean) <- "Celltype_detailed"
+# CellChat
+
+library(CellChat)
+library(patchwork)
+
+RunCellChat <- function(Seurat){
+HeSk.CC <- createCellChat(Seurat, assay = "RNA")
+
+CellChatDB <- CellChatDB.mouse
+showDatabaseCategory(CellChatDB)
+
+HeSk.CC@DB <- CellChatDB
+HeSk.CC <- subsetData(HeSk.CC)
+HeSk.CC <- identifyOverExpressedGenes(HeSk.CC)
+HeSk.CC <- identifyOverExpressedInteractions(HeSk.CC)
+HeSk.CC <- projectData(HeSk.CC, PPI.mouse)
+HeSk.CC <- computeCommunProb(HeSk.CC)
+HeSk.CC <- filterCommunication(HeSk.CC)
+HeSk.CC <- computeCommunProbPathway(HeSk.CC)
+HeSk.CC <- aggregateNet(HeSk.CC)
+
+return(HeSk.CC)
+}
+
+CC.objects <- list()
+
+TPs <- unique(Myo_concat_clean$Timepoint)
+
+for(i in TPs){
+  X <- RunCellChat(subset(Myo_concat_clean, Timepoint == i))
+  X <- netAnalysis_computeCentrality(X, slot.name = "netP")
+  name <- paste(i, sep = "_")
+CC.objects[[name]] <- X
+}
+
+save(CC.objects, file = "/media/tombor/Helios_scStorage/Lukas/Analysis/EHT/Combined_Seurats/Cellchat_objects.Rds")
+
+
+setwd("/media/tombor/Helios_scStorage/Lukas/Analysis/For other Projects/Fibrosis_Nuno/Analysis/Update_09_05_22")
+PlotAnalysisHeatmap <- function(cellchat){
+ht1 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing", signaling = c("CXCL", "CCL", "COMPLEMENT", "FN1", "HSPG", "COLLAGEN", "TENASCIN", "THBS", "TGFb", "TNF", "MK", "VCAM", "PTN", "SELL", "PROS", "PARs", "PERIOSTIN", "NCAM", "MHC-I", "TWEAK", "BMP", "IL6", "NEGR", "CALCR", "PROS", "JAM", "CHEMERIN", "APP", "GAS", "MIF", "AGRN", "IGF", "ITGAL-ITGB2", "EGF"), color.heatmap = "Reds")
+ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming", signaling = c("CXCL", "CCL", "COMPLEMENT", "FN1", "HSPG", "COLLAGEN", "TENASCIN", "THBS", "TGFb", "TNF", "MK", "VCAM", "PTN", "SELL", "PROS", "PARs", "PERIOSTIN", "NCAM", "MHC-I", "TWEAK", "BMP", "IL6", "NEGR", "CALCR", "PROS", "JAM", "CHEMERIN", "APP", "GAS", "MIF", "AGRN", "IGF", "ITGAL-ITGB2", "EGF"))
+return(ht1 + ht2)
+}
+
+lapply(CC.objects, PlotAnalysisHeatmap)
+
+group_cellType <- c("Mural", "Mural", "Hema", "FB", "EC", "Hema", "FB", "Hema", "Hema", "Hema", "Hema", "Epi", "Hema")
+names(group_cellType) <- levels(CC.objects$Heart_Early@idents)
+pathways.show <- "TGFb"
+for(i in CC.objects){
+  cellchat <- i
+  name <- paste0(unique(cellchat@meta$Timepoint)," ", unique(cellchat@meta$Tissue))
+  pdf(file =paste0(name, pathways.show, "newCT.pdf"), width = 10, height =8)
+netVisual_chord_cell(cellchat, signaling = pathways.show, group = group_cellType, title.name = paste0(name, ": ", pathways.show, " signaling network"))
+dev.off()
+}
+
+group_cellType <- c("Fib", "other", "other", "other")
+names(group_cellType) <- levels(CC.objects$Heart_Early@idents)
+pathways.show <- "COMPLEMENT"
+for(i in CC.objects){
+  cellchat <- i
+  name <- paste0(unique(cellchat@meta$Timepoint)," ", unique(cellchat@meta$Tissue))
+  pdf(file =paste0(name, pathways.show, ".pdf"), width = 10, height =8)
+netVisual_chord_cell(cellchat, signaling = pathways.show, group = group_cellType, title.name = paste0(name, ": ", pathways.show, " signaling network"))
+dev.off()
+}
+
+pathways.show <- "CCL"
+for(i in CC.objects){
+  cellchat <- i
+  name <- paste0(unique(cellchat@meta$Timepoint)," ", unique(cellchat@meta$Tissue))
+  pdf(file =paste0(name, pathways.show, ".pdf"), width = 10, height =8)
+netVisual_chord_cell(cellchat, signaling = pathways.show, group = group_cellType, title.name = paste0(name, ": ", pathways.show, " signaling network"))
+dev.off()
+}
+pathways.show <- c("TGFb","CCL","COMPLEMENT")
+for(i in CC.objects){
+  cellchat <- CC.objects[[1]]
+  name <- paste0(unique(cellchat@meta$Timepoint), unique(cellchat@meta$Tissue))
+ # pdf(file =paste0(name, "Contribution.pdf"), width = 20, height =20)
+netAnalysis_contribution(cellchat, signaling = c(unique(cellchat@netP$pathways)), vertex.receiver = c(4,7), title = paste0(name, " L-R Contributions Top Receiving in Fibroblasts"), thresh = 0.0000005, x.rotation = T)
+dev.off()
+}
+
+cellchat <- CC.objects[[6]]
+name <- paste0(unique(cellchat@meta$Timepoint), unique(cellchat@meta$Tissue))
+netVisual_bubble(cellchat, sources.use = 1, remove.isolate = FALSE, title.name = paste0(name, ": ", " Interactions"))
+
+cellchat <- CC.objects[[6]]
+name <- paste0(unique(cellchat@meta$Timepoint), unique(cellchat@meta$Tissue))
+netVisual_bubble(cellchat, targets.use = 1, remove.isolate = FALSE, title.name = paste0(name, ": ", " Interactions"))
+
+}
+
+
+int_all <- list()
+for(cellchat in CC.objects){
+cellchat <- rankNetPairwise(cellchat)
+  for(i in unique(cellchat@meta$ident)){
+    name <- paste("from",i,"to fibroblasts", "in", unique(cellchat@meta$Timepoint), unique(cellchat@meta$Tissue))
+    int <- identifyEnrichedInteractions(cellchat, from = i, to= "Fibroblasts", bidirection = F)
+    int$name = name
+    int$sender = i
+    int$receiver = "Fibroblasts"
+    int$Timepoint =  unique(cellchat@meta$Timepoint)
+    int$Tissue = unique(cellchat@meta$Tissue)
+    int$value <- cellchat@net$prob["Fibroblasts",i,rownames(int)]
+    int_all[[name]] <- int
+    }
+  
+  for(j in as.character(unique(cellchat@meta$ident))[!as.character(unique(cellchat@meta$ident)) == "Fibroblasts"]){
+      name <- paste("from fibroblasts to",j, "in", unique(cellchat@meta$Timepoint), unique(cellchat@meta$Tissue))
+      int <- identifyEnrichedInteractions(cellchat, from = "Fibroblasts", to= j, bidirection = F)
+      int$name = name
+      int$sender = "Fibroblasts"
+      int$receiver = j
+      int$Timepoint =  unique(cellchat@meta$Timepoint)
+      int$Tissue = unique(cellchat@meta$Tissue)
+      int$value <- cellchat@net$prob[j,"Fibroblasts",rownames(int)]
+      int_all[[name]] <- int
+  }
+}
+
+Interaction.db <- purrr::reduce(int_all, full_join)
+
+library(openxlsx)
+wb <- createWorkbook()
+
+hs1 <- createStyle(
+  fgFill = "#DCE6F1", halign = "CENTER", textDecoration = "bold",
+  border = "Bottom"
+)
+addWorksheet(wb, "Interactions_all")
+writeData(wb, sheet = "Interactions_all", x = Interaction.db, rowNames = T, headerStyle = hs1)
+
+
+saveWorkbook(wb, file = "220513_Cellchat_interactions_to_from_Fibroblasts.xlsx")
+```
+
