@@ -1,0 +1,482 @@
+---
+title: "Revision - Lukas IMEC"
+author: "Till Lautenschläger"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## Import Lukas Dataset
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(zellkonverter)
+library(ggpubr)
+library(zellkonverter)
+library(Seurat)
+library(plyr)
+
+#Set wokring directory 
+setwd("/Users/tilllautenschlager/OneDrive - Johann Wolfgang Goethe Universität/Uni/PhD/Bioinformatic/24_Lukas IMEC/")
+
+#Import functions
+source("/Users/tilllautenschlager/Library/CloudStorage/OneDrive-JohannWolfgangGoetheUniversität/Uni/PhD/Bioinformatic/23_LongTermAMI/Scripts/R_HelperFunctions/Import10X-HelperFunctions_SeuratV3.R")
+
+#Load dataset
+load("./IMEC paper submission Sept 23/data/Rds_objects/Final_Myo_Seurat_with_celltypes.Rds")
+
+#Update Seurat object 
+Myo_concat <- UpdateSeuratObject(Myo_concat)
+
+# Normalize and identify variable features
+Myo_concat <- NormalizeData(Myo_concat)
+Myo_concat <- FindVariableFeatures(Myo_concat, selection.method = "vst", nfeatures = 2000)
+Myo_concat <- ScaleData(Myo_concat)
+
+# Run PCA and determine the number of PCs to use
+Myo_concat <- RunPCA(Myo_concat, npcs = 50, verbose = FALSE)
+ElbowPlot(Myo_concat, ndims = 50)  # Check how many PCs to keep
+
+# Run UMAP
+Myo_concat <- RunUMAP(Myo_concat, dims = 1:30)
+DimPlot(Myo_concat, reduction = "umap", label = TRUE, repel = TRUE)
+
+#Order Timepoint factor
+Myo_concat$Timepoint <- factor(Myo_concat$Timepoint, levels = c("Hom", "d1", "d3", "d5", "d7", "d14", "d28"))
+
+# Visualize clusters
+DimPlot(Myo_concat, reduction = "umap", group.by = "celltype_det")
+
+df <- as.data.frame.matrix(table(Myo_concat$celltype_det, Myo_concat$Sample))
+write.csv(df, "./Cell numbers per Cell_type.csv")
+```
+
+## DO.Dotplot function
+
+```{r}
+# Dotplot function for one or two given groups for multiple genes, using expression values
+#' @author Mariano Ruz Jurado
+#' @title DO Dot plot
+#' @description Creates a dot plot in a similar fashion as the other DO functions but for an additional condition if wanted
+#' @param Seu_object The seurat Seu_object
+#' @param group.by.x group name to plot on x-axis
+#' @param group.by.y group name to look for in meta data
+#' @param group.by.y2 second group name to look for in meta data
+#' @param across.group.by.x calculate a pseudobulk expression approach for the x-axis categories
+#' @param dot.size Vector of dot size 
+#' @param plot.margin = plot margins
+#' @param midpoint midpoint in color gradient
+#' @param Feature Genes or DF of interest, Data frame should have columns with gene and annotation information, e.g. output of FindAllMarkers
+#' @param limits_colorscale Set manually colorscale limits
+#' @param colZ IF True calculates the Z-score of the average expression per column
+#' @param hide_zero Removes dots for genes with 0 expression
+#' @param annotation_x Adds annotation on top of x axis instead on y axis
+#' @param point_stroke Defines the thickness of the black stroke on the dots
+#' @param ... Further arguments passed to annoSegment function if annotation_x == T
+ DO.Dotplot <- function(Seu_object,
+                       Feature, 
+                       group.by.x = NULL,
+                       group.by.y = NULL,
+                       group.by.y2 = NULL,
+                       across.group.by.x=F,
+                       dot.size = c(1,6),
+                       plot.margin = c(1, 1, 1, 1),
+                       midpoint = 0.5,
+                       colZ=F,
+                       returnValue = F,
+                       log1p_nUMI=T,
+                       hide_zero=T,
+                       annotation_x=F,
+                       annotation_x_position=0.25,
+                       annotation_x_rev=F,
+                       point_stroke=0.2,
+                       limits_colorscale=NULL,
+                       coord_flip=F,
+                       ... ){ 
+  require(ggtext)
+  require(Seurat)
+  
+  if(!is.vector(Feature) && !is.data.frame(Feature)){
+     stop("Feature is not a vector of strings or a data frame!")
+  } 
+  
+  #type of Feature
+  FeatureType <- mode(Feature) 
+   
+  #check if Feature is a vector and annotation specified as true -> no cluster information provided for annotation
+  if (is.vector(Feature) && annotation_x == T) {
+    stop("Feature is a vector, but annotation_x is set to TRUE. If annotation on xaxis is wanted with specific cluster names you need to provide a dataframe with a column containing cluster names for the genes, like in Seurat::FindAllMarkers!")
+  }
+  
+  #check the input if it is a data frame 
+  if (!is.vector(Feature)) {
+    orig_DF <- Feature # save original df for annotation purposes
+    orig_DF$cluster <- as.vector(orig_DF$cluster)
+    cluster_name <- grep("cluster|group|annotation|cell", colnames(Feature), value = T) # Grep name of column, relevant for downstream assignments
+    cluster <- unique(Feature[[grep("cluster|group|annotation|cell", colnames(Feature))]])
+    Feature <- unique(Feature[[grep("gene|feature", colnames(Feature))]])
+    
+    if (is.null(cluster) || is.null(Feature)) {
+      stop("Couldn't derive Cluster and Feature information from the provided Dataframe. \n Supported names for cluster: cluster|group|annotation|cell\n Supported names for Feature: gene|feature. \n Please make sure that your colnames in the provided Dataframe are supported.")
+    }
+  }
+  
+  # Create Feature expression data frame with grouping information
+  geneExp <- expm1(FetchData(object = Seu_object, vars = Feature, layer = "data")) # 
+  
+  #catch wrong handling of arguments
+  if (is.null(group.by.x) && !is.null(group.by.y) && is.null(group.by.y2)) {
+    stop("If you want to make a Marker Plot with just one provided group.by then please use group.by.x!")
+  }
+  
+  geneExp$xaxis <- Seu_object@meta.data[[group.by.x]]
+  
+  if (!is.null(group.by.y) && is.null(group.by.y2)) {
+    geneExp$id <- paste(Seu_object@meta.data[[group.by.y]], sep = "")
+  } else if(!is.null(group.by.y) && !is.null(group.by.y2)){
+    geneExp$id <- paste(Seu_object@meta.data[[group.by.y]], " (", 
+                        Seu_object@meta.data[[group.by.y2]], ")", sep = "")    
+  } else if(is.null(group.by.y) && is.null(group.by.y2)){
+    geneExp$id <- paste(Seu_object@meta.data[[group.by.x]], sep = "")
+  }
+  
+  # Include xaxis in the overall grouping
+  data.plot <- lapply(X = unique(geneExp$id), FUN = function(ident) {
+    data.use <- geneExp[geneExp$id == ident, ]
+    
+    lapply(X = unique(data.use$xaxis), FUN = function(x_axis) {
+      data.cell <- data.use[data.use$xaxis == x_axis, 1:(ncol(geneExp) - 2), drop = FALSE]
+      avg.exp <- apply(X = data.cell, MARGIN = 2, FUN = function(x) {
+        return(mean(x))
+      })
+      pct.exp <- apply(X = data.cell, MARGIN = 2, FUN = PercentAbove, 
+                       threshold = 0)
+      
+      res <- data.frame(id = ident, xaxis = x_axis, avg.exp = avg.exp, pct.exp = pct.exp * 100)
+      res$gene <- rownames(res)
+      return(res)
+    }) %>% do.call("rbind", .)
+  }) %>% do.call("rbind", .) %>% data.frame()
+  
+  data.plot.res <- data.plot
+  
+  #add the cluster information to the plot if annotation_x is set to true and a dataframe was provided with cluster annotation
+  #TODO Clean this part a bit up
+  if (annotation_x==T && !is.null(cluster)) {
+    data.plot.res <- purrr::map_df(seq_len(nrow(data.plot.res)), function(x){
+      tmp <- data.plot.res[x,]
+      tmp$celltype <- orig_DF[which(orig_DF[[grep("gene|feature", colnames(orig_DF))]] == tmp[[grep("gene|feature", colnames(tmp))]]), cluster_name][[1]]
+      return(tmp)
+    })
+    
+    # data.plot.res <- data.plot.res %>%
+    #   dplyr::arrange(celltype)
+  }
+  
+  
+  data.plot.res$xaxis <- factor(data.plot.res$xaxis, levels = sort(unique(data.plot.res$xaxis)))
+  
+  #create grouping column for multiple grouping variables on the y-axis
+  if (!is.null(group.by.y2)) {
+    data.plot.res$group <- sapply(strsplit(as.character(data.plot.res$id), 
+                                           split = "\\(|\\)"), "[", 2)    
+  }
+  
+  if (hide_zero==T) {
+    data.plot.res$pct.exp <- ifelse(data.plot.res$pct.exp == 0, NA, data.plot.res$pct.exp) # so fraction 0 is not displayed in plot
+    data.plot.res <- data.plot.res[complete.cases(data.plot.res$pct.exp),]# remove empty lines    
+  }
+  
+  #create bulk expression for group.by.x
+  if (across.group.by.x == T) {
+    bulk_tmp <- data.plot.res %>%
+      dplyr::group_by(id, gene) %>%
+      summarise(avg.exp = mean(avg.exp),
+                pct.exp = mean(pct.exp))
+    bulk_tmp$xaxis <- "Pseudobulk"
+    data.plot.res <- dplyr::bind_rows(data.plot.res, bulk_tmp)
+    data.plot.res$xaxis <- factor(data.plot.res$xaxis, levels = c("Pseudobulk", setdiff(sort(unique(data.plot.res$xaxis)), "Pseudobulk")))
+  }
+  
+  # get the scale pvalue for plotting
+  if (log1p_nUMI==T) {
+    data.plot.res$avg.exp.plot <- log1p(data.plot.res$avg.exp) # reapply the log transformation if wanted
+  } else{
+    data.plot.res$avg.exp.plot <- data.plot.res$avg.exp
+  }
+  
+  ### TODO Z Scoring per xaxis
+  if (colZ==T) {
+    data.plot.res %<>% dplyr::group_by(xaxis) %>%
+      dplyr::mutate(z_avg_exp = (avg.exp - mean(avg.exp, na.rm=TRUE)) / sd(avg.exp, na.rm=TRUE)) %>%
+      ungroup()
+    exp.title = "Scaled expression \n in group"
+    fill.values = data.plot.res$z_avg_exp
+    ###   
+  } else if(log1p_nUMI ==T){
+    exp.title = "Mean log(nUMI) \n in group"
+    fill.values = data.plot.res$avg.exp.plot
+  } else{
+    exp.title = "Mean nUMI \n in group"
+    fill.values = data.plot.res$avg.exp.plot 
+  }
+  
+  #Define which columns to take for dotplot, it should be able to correctly capture one group.by.x
+  if (identical(as.vector(data.plot.res$id), as.vector(data.plot.res$xaxis)) && FeatureType=="list") { # go over input type
+    # get rid of previous factoring to set new one, first alphabetical order on y
+    data.plot.res$xaxis <- as.vector(data.plot.res$xaxis)
+    data.plot.res$id <- factor(data.plot.res$id, levels = sort(unique(data.plot.res$id)))
+    data.plot.res$gene <- factor(data.plot.res$gene, levels = orig_DF[order(orig_DF$cluster, decreasing = F),]$gene)
+    
+    if (annotation_x_rev == T) {
+      data.plot.res$id <- factor(data.plot.res$id, levels = rev(sort(unique(data.plot.res$id))))
+    }
+    
+    aes_var <- c("gene", "id")
+    # there is a second case here for providing just a gene list which need to be adressed with the same aes_var
+  } else if(identical(as.vector(data.plot.res$id), as.vector(data.plot.res$xaxis))){
+    
+    # data.plot.res$id <- factor(data.plot.res$id, levels = sort(unique(data.plot.res$id)))
+    # data.plot.res$gene <- factor(data.plot.res$gene, levels = sort(unique(data.plot.res$gene)))
+    
+    aes_var <- c("gene", "id")
+    
+    } else{ # all other cases where group.by.y is specified
+      data.plot.res$id <- factor(data.plot.res$id, levels = rev(sort(unique(data.plot.res$id))))
+      aes_var <- c("xaxis", "id")
+    
+  }
+  
+  
+  
+  pmain <- ggplot2::ggplot(data.plot.res, ggplot2::aes(x = !!sym(aes_var[1]),y = !!sym(aes_var[2]))) + ggplot2::theme_bw(base_size = 14)+ 
+    ggplot2::xlab("") + ggplot2::ylab("")+ ggplot2::coord_fixed(clip = "off")+ 
+    ggplot2::theme(plot.margin = ggplot2::margin(t = plot.margin[1], 
+                                                 r = plot.margin[2],
+                                                 b = plot.margin[3],
+                                                 l = plot.margin[4], 
+                                                 unit = "cm"),
+                   axis.text = ggplot2::element_text(color = "black"),
+                   legend.direction = "horizontal",
+                   axis.text.x = element_text(color = "black",angle = 90,hjust = 1,vjust = 0.5, size = 14, family = "Helvetica"),
+                   axis.text.y = element_text(color = "black", size = 14, family = "Helvetica"),
+                   axis.title.x = element_text(color = "black", size = 14, family = "Helvetica"),
+                   axis.title = element_text(size = 14, color = "black", family = "Helvetica"),
+                   plot.title = element_text(size = 14, hjust = 0.5,face="bold", family = "Helvetica"),
+                   plot.subtitle = element_text(size = 14, hjust = 0, family = "Helvetica"),
+                   axis.line = element_line(color = "black"),
+                   strip.text.x = element_text(size = 14, color = "black", family = "Helvetica", face = "bold"),
+                   legend.text = element_text(size = 10, color = "black", family = "Helvetica"),
+                   legend.title = element_text(size = 10, color = "black", family = "Helvetica", hjust =0),
+                   legend.position = "right",
+                   panel.grid.major = element_blank(),
+                   panel.grid.minor = element_blank(),)
+  
+  guides.layer <- ggplot2::guides(fill = ggplot2::guide_colorbar(title = exp.title,
+                                                                 title.position = "top",
+                                                                 title.hjust = 0.5,
+                                                                 barwidth = unit(3.8,"cm"), # changes the width of the color legend
+                                                                 barheight = unit(0.5,"cm"),
+                                                                 frame.colour = "black",
+                                                                 frame.linewidth = 0.3,
+                                                                 ticks.colour = "black",
+                                                                 order = 2),
+                                  size = ggplot2::guide_legend(title = "Fraction of cells \n in group (%)", 
+                                                               title.position = "top", title.hjust = 0.5, label.position = "bottom", 
+                                                               override.aes = list(color = "black", fill = "grey50"), 
+                                                               keywidth = ggplot2::unit(0.5, "cm"), # changes the width of the precentage dots in legend
+                                                               order = 1))
+  
+  dot.col = c("#fff5f0","#990000") # TODO change the scalefillgradient to +n in the else part
+  gradient_colors <- c("#fff5f0", "#fcbba1", "#fc9272", "#fb6a4a", "#990000")
+  # "#FFFFFF","#08519C","#BDD7E7" ,"#6BAED6", "#3182BD", 
+  if (length(dot.col) == 2) {
+    breaks <- scales::breaks_extended(n=5)(range(fill.values))
+    
+    if (is.null(limits_colorscale)) {
+      limits_colorscale <- c(min(range(fill.values))*.99,max(range(fill.values))*1.01)      
+    }
+    
+    if (max(breaks) > max(limits_colorscale)) {
+      limits_colorscale[length(limits_colorscale)] <- breaks[length(breaks)]
+    }
+    
+    pmain <- pmain + ggplot2::scale_fill_gradientn(colours = gradient_colors,
+                                                   breaks = breaks,
+                                                   #breaks = pretty(as.vector(quantile(fill.values)), n =10),
+                                                   limits = limits_colorscale)
+  }else{
+    
+    pmain <- pmain + ggplot2::scale_fill_gradient2(low = dot.col[1],
+                                                   mid = dot.col[2],
+                                                   high = dot.col[3],
+                                                   midpoint = midpoint, name = "Gradient")
+  }
+  if (across.group.by.x == T) {
+    
+    pmain <- pmain + 
+      ggplot2::geom_point(ggplot2::aes(fill = fill.values,
+                                       size = pct.exp),shape = 21,stroke=point_stroke)+
+      guides.layer +
+      facet_grid(cols = vars(gene), scales = "fixed")+
+      ggplot2::scale_size(range = c(dot.size[1],dot.size[2])) +
+      ggplot2::scale_size_continuous(breaks = pretty(round(as.vector(quantile(data.plot.res$pct.exp))), n =10)[seq(1, 10, by = 2)],
+                                     limits = c(min(data.plot.res$pct.exp)*1.05,max(data.plot.res$pct.exp)*1.05))+
+      theme(panel.spacing = unit(0, "lines"),
+            axis.text.x=ggtext::element_markdown(color = "black",angle = 90,hjust = 1,vjust = 0.5, size = 14, family = "Helvetica"))+
+      scale_x_discrete(labels = function(labels){
+        labels <- ifelse(labels== "Pseudobulk", paste0("<b>", labels, "</b>"),labels)
+        return(labels)
+      }) 
+    
+  } else if(identical(as.vector(data.plot.res$id), as.vector(data.plot.res$xaxis))){
+    
+    pmain <- pmain + 
+      ggplot2::geom_point(ggplot2::aes(fill = fill.values,
+                                       size = pct.exp),shape = 21,stroke=point_stroke)+
+      guides.layer +
+      # facet_wrap(~facet_group, scales="free_x")+
+      ggplot2::scale_size(range = c(dot.size[1],dot.size[2])) +
+      ggplot2::scale_size_continuous(breaks = pretty(round(as.vector(quantile(data.plot.res$pct.exp))), n =10)[seq(1, 10, by = 2)],
+                                     limits = c(min(pretty(round(as.vector(quantile(data.plot.res$pct.exp))), n =10)[seq(1, 10, by = 2)])*.95,max(data.plot.res$pct.exp)*1.05))+
+      theme(panel.spacing = unit(0, "lines"))
+    
+    if (annotation_x==T) {
+      #use the annotation function from jjAnno package
+      jjA <- system.file(package = "jjAnno") # Make sure package is installed
+      ifelse(nzchar(jjA), "", stop("Install jjAnno CRAN package for annotation on xaxis:!"))
+      
+      # pmain <- pmain + 
+      #   ggplot2::theme(axis.text.y = element_blank(),
+      #                  axis.ticks.y = element_blank())
+      
+      plot_max_y <- ggplot_build(pmain)
+      plot_max_y <- plot_max_y$layout$panel_params[[1]]$y.range[2] + annotation_x_position
+      
+      pmain <- jjAnno::annoSegment(
+        object = pmain,
+        annoPos = "top",
+        aesGroup = T,
+        aesGroName = "celltype",
+        fontface = "bold",
+        fontfamily = "Helvetica",
+        pCol = rep("black", length(cluster)),
+        textCol = rep("black", length(cluster)),
+        addBranch = T,
+        branDirection = -1,
+        addText = T,
+        yPosition = plot_max_y,
+        # textSize = 14,
+        # hjust = 0.5,
+        # vjust = 0,
+        # textRot = 0,
+        # segWidth = 0.3,
+        # lwd = 3
+        ...
+      )
+      
+      
+    }
+    
+    if (coord_flip==T) {
+      pmain <- pmain + ggplot2::coord_flip()
+    }   
+    
+    if (coord_flip==T && annotation_x==T) {
+      warning("Annotation_x and coord_flip set on TRUE, might result in unwanted behaviour!")
+    }
+    
+  } else{
+    
+    pmain <- pmain + 
+      ggplot2::geom_point(ggplot2::aes(fill = fill.values,
+                                       size = pct.exp),shape = 21,stroke=point_stroke)+
+      guides.layer +
+      facet_grid(cols = vars(gene), scales = "fixed")+
+      ggplot2::scale_size(range = c(dot.size[1],dot.size[2])) +
+      ggplot2::scale_size_continuous(breaks = pretty(round(as.vector(quantile(data.plot.res$pct.exp))), n =10)[seq(1, 10, by = 2)],
+                                     limits = c(min(pretty(round(as.vector(quantile(data.plot.res$pct.exp))), n =10)[seq(1, 10, by = 2)])*.95,max(data.plot.res$pct.exp)*1.05))+
+      theme(panel.spacing = unit(0, "lines"))    
+  }
+  
+  if(returnValue == T){
+    return(data.plot.res)
+  }
+  return(pmain)
+  
+}
+```
+
+## IMEC marker expression in ECs
+
+```{r}
+Myo_ECs <- subset(Myo_concat, celltype_det %in% "Endothelial cells")
+
+Myo_ECs$Timepoint <- factor(Myo_ECs$Timepoint, levels = c("Hom", "d1", "d3", "d5", "d7", "d14", "d28"))
+
+DotPlot(Myo_ECs, c("Ptprc","Runx1", "Cd44", "Cd68", "Ccl7", "H2-Aa", "H2-Ab1", "Tgfbr1"), group.by = "Timepoint", cols = c("grey90", "red"), scale = F, dot.scale = 8)+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("/Users/tilllautenschlager/OneDrive - Johann Wolfgang Goethe Universität/Uni/PhD/Bioinformatic/24_Lukas IMEC/Revision Lukas/figures/IMEC Marker Expression in ECs_Timecourse.svg")
+```
+
+## Tgfb2 expression over timecourse
+
+```{r}
+data <- readRDS("/Users/tilllautenschlager/OneDrive - Johann Wolfgang Goethe Universität/Uni/PhD/Bioinformatic/24_Lukas IMEC/Revision Lukas/data/scanpy_all_cells_raw.rds")
+
+DO.Dotplot(data, Feature = c(Tgfb2"), group.by.x = "Timepoint", group.by.y = "leiden")
+ggsave("./Tgf1,2,3_R_raw.svg", width = 10, height = 4)
+```
+
+## T-cell subcluster CD4+ CD8+ and Foxp3+ over time
+
+```{r}
+
+Tcells <- readRDS("/Users/tilllautenschlager/OneDrive - Johann Wolfgang Goethe Universität/Uni/PhD/Bioinformatic/24_Lukas IMEC/Revision Lukas/data/Subcluster_T-cells_revision.rds")
+
+DimPlot(Tcells, group.by = "leiden", label = T, label.box = T)+
+FeaturePlot(Tcells, features = c("Cd4", "Cd8a", "Il2ra", "Cd69", "Foxp3"), order=T, cols = c("grey90", "red"))
+
+Tcells$Timepoint <- factor(Tcells$Timepoint, levels = c("Hom", "d1", "d3", "d5", "d7", "d14", "d28"))
+
+DO.Dotplot(Tcells, c("Cd4", "Cd8a", "Il2ra", "Cd69", "Foxp3"), group.by.x = "Timepoint", group.by.y = "leiden",coord_flip=T)
+
+Tcells$subclusters <- Tcells$leiden
+
+Tcells$subclusters <- revalue(Tcells$subclusters, 
+  c("0" = "cytotoxic T cells",
+  "4" = "cytotoxic T cells",
+  "5" = "cytotoxic T cells",
+  "6" = "cytotoxic T cells",
+  "2" = "CD25+ T cells",
+  "3" = "cytotoxic Th1-like cells",
+  "1" = "cytotoxic Th1-like cells"
+))
+
+DimPlot(Tcells, group.by = "subclusters")
+
+markers_expr <- FetchData(Tcells, vars = c( "Cd4", "Cd8a", "Il2ra", "Foxp3", "Ctla4",  "Timepoint"))
+markers_expr$Cd8a <- 
+  markers_expr$Cd8a > 0
+markers_expr$Cd4 <- 
+  markers_expr$Cd4 > 0
+markers_expr$CD4_Cd25 <- 
+  markers_expr$Cd4 > 0 & markers_expr$Il2ra > 0
+
+table(markers_expr$Timepoint[markers_expr$Cd8])
+df <- as.data.frame.matrix(table(Tcells$subclusters, Tcells$Timepoint))
+
+markers_expr <- FetchData(Tcells, vars = c("Cd4", "Il2ra", "Foxp3", "Ctla4", "Timepoint"))
+markers_expr$CD4_CD25_Foxp3_positive <- 
+  markers_expr$Ctla4 > 0 & markers_expr$Il2ra > 0 
+
+table(markers_expr$Timepoint[markers_expr$CD4_CD25_Foxp3_positive])
+
+foxp3_expr <- FetchData(Tcells, vars = c("Foxp3", "Timepoint"))
+foxp3_expr$Foxp3_positive <- foxp3_expr$Foxp3 > 0
+table(foxp3_expr$Foxp3_positive, foxp3_expr$Timepoint)
+
+table(Tcells$subclusters, Tcells$Timepoint)
+```
